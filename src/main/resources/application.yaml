@@ -1,3 +1,18 @@
 spring:
   application:
     name: ghost-bus-detector
+
+  datasource:
+    url: jdbc:postgresql://localhost:15432/ghostbus
+    username: ghostbus
+    password: ${DB_PASSWORD:localdevpassword}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

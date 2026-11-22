@@ -1,9 +1,14 @@
 services:
-  postgres:
-    image: 'postgres:latest'
+  db:
+    image: postgis/postgis:17-3.7
     environment:
-      - 'POSTGRES_DB=mydatabase'
-      - 'POSTGRES_PASSWORD=secret'
-      - 'POSTGRES_USER=myuser'
+      POSTGRES_DB: ghostbus
+      POSTGRES_USER: ghostbus
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-localdevpassword}
     ports:
-      - '5432'
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - ghostbus_data:/var/lib/postgresql/data
+
+volumes:
+  ghostbus_data:

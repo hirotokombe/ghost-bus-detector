@@ -75,6 +75,7 @@ service_id,date,exception_type
 - `service_id = 5` normally includes Sundays.
 - November 22, 2026 is a Sunday, but `exception_type = 2` removes that service on that specific date.
 - Therefore, trips assigned to `service_id = 5` **should not be expected** on November 22, and they **should not be classified as ghosts** for failing to appear.
+- In fact, service `5` is removed on **every** Sunday in its range, so it never runs in this schedule (see Calendar under Dataset Observations).
 
 ### Overnight Trips and GTFS Service Days
 
@@ -133,6 +134,7 @@ Knowing the last observed vehicle position relative to the destination might lat
 | `calendar.txt` | 18 |
 | `calendar_dates.txt` | 52 |
 | `stop_times.txt` | 2,901,867 |
+| `shapes.txt` | 874,720 |
 
 These are the expected row counts for the database tables after an import. `stop_times.txt` is too large for one Excel worksheet.
 
@@ -195,7 +197,66 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 ### Calendar
 
 - OC Transpo uses **both** `calendar.txt` and `calendar_dates.txt`.
+
+**`calendar.txt` (18 services):**
+
+| `service_id` | Days | Date range |
+| --- | --- | --- |
+| `1`, `5` | Sunday only | Nov 20 – Dec 19 |
+| `7`, `11` | Monday only | Nov 20 – Dec 19 |
+| `10` | Tuesday only | Nov 20 – Dec 19 |
+| `4` | Wednesday only | Nov 20 – Dec 19 |
+| `2`, `9` | Thursday only | Nov 20 – Dec 19 |
+| `3` | Friday only | Nov 20 – Dec 19 |
+| `6`, `8` | Saturday only | Nov 20 – Dec 19 |
+| `SEPT26-TCFDSun-Sunday-01`, `SEPT26-TRILSUN-Sunday-02` | Sunday | Nov 22 – Dec 13 |
+| `SEPT26-TCFDMth-Weekday-01` | Mon–Fri | Nov 23 – Dec 17 |
+| `SEPT26-TRILLTP-Weekday-01` | Mon–Fri | Nov 23 – Dec 18 |
+| `SEPT26-TCFDFri-Weekday-02` | Mon–Fri | Nov 27 – Dec 18 |
+| `SEPT26-TCFDSat-Saturday-01`, `SEPT26-TRILSAT-Saturday-02` | Saturday | Nov 28 – Dec 19 |
+
+- Each **numbered** service runs on exactly one day of the week. There is no single "weekday" bus service.
+- The **named** services likely belong to the O-Train (`TCFD`/`CFD` = Confederation Line 1?, `TRIL` = Trillium Line 2?). **To confirm** by checking which `route_id`s in `trips.txt` use them.
+
+**`calendar_dates.txt` (52 exceptions) changes the picture a lot:**
+
+- **Four `service_id`s exist only in `calendar_dates.txt`**, with no row in `calendar.txt`: `SEPT26-CFDFri-Weekday-03`, `SEPT26-CFDSA-Saturday-03`, `SEPT26-CFDSU-Sunday-03`, `SEPT26-CFDMTh-Weekday-03`. They run only on the dates where they are ADDED. This is why the schema has a separate `services` table built from both files.
+- **Some services never run at all once exceptions are applied:**
+  - `5` (Sunday) is REMOVED on every Sunday in its range (Nov 22, 29, Dec 6, 13).
+  - `2` (Thursday) is REMOVED on every Thursday in its range (Nov 26, Dec 3, 10, 17).
+  - Reading `calendar.txt` alone would expect all their trips and flag every one as a ghost.
+- **Some services run on one day only:** `8` (Saturday) runs only Nov 21 (where it replaces `6`); `11` (Monday) runs only Nov 23 (where it replaces `7`).
+- **Confirmed: names hide day patterns that `calendar.txt` doesn't show.** `SEPT26-TCFDMth-Weekday-01` says Mon–Fri, but every Friday is REMOVED, so it's really Mon–Thu. `SEPT26-TCFDFri-Weekday-02` says Mon–Fri, but Mon–Thu are REMOVED, so it's really Friday only.
+- **Replacement schedules:** for Nov 30 – Dec 5, the regular `TCFD` services are REMOVED and the `CFD...-03` services are ADDED instead (reason unknown, possibly planned work on Line 1).
+- **Some ADDED rows are redundant:** e.g. `8` is ADDED on Nov 21, a Saturday it already runs on. Harmless, but the planner must not count such a trip twice.
+
+**Rule for the daily planner:** a service runs on date D if (it's in `calendar.txt`, D is in its date range, its weekday flag is true, **and** D isn't REMOVED) **or** D is ADDED for it in `calendar_dates.txt`.
+
+### Stop times
+
 - One `trip_id` appears in multiple `stop_times.txt` rows—one for each scheduled stop on its journey.
+- Trip `10000010` has 55 rows, `stop_sequence` 1–55, departing `10047` at 82080 s (22:48:00) and arriving at `10160` at 84900 s (23:35:00), matching the trace.
+- Every one of its 55 stops has a scheduled time, and `arrival_time` equals `departure_time` at each stop. (Other trips may still leave times empty at non-timepoint stops.)
+- **Times are filled in at non-timepoint stops too.** The first stop of trip `10000010` has `timepoint = 1` and the next stops `timepoint = 0`, yet all have times. Only timepoints are times the bus is held to; the rest are OC Transpo's estimates.
+- **`shape_dist_traveled` is filled in** and looks like metres along the shape (`0.0`, `516.49`, `1153.94` for the first three stops). It could help later to measure how far along its route a vehicle was when it disappeared.
+- The first stop has `drop_off_type = 1` (no drop-off), as expected at the start of a trip.
+- `stop_times` uses **platform-level `stop_id`s**: the trip stops at `9449` (MACKENZIE KING A), `9868` (PARLIAMENT B), `9945` (TUNNEY'S PASTURE D) and ends at `10160` (LINCOLN FIELDS 4B), all children of `_stn` stations.
+
+### Shapes
+
+- 874,720 points in total.
+- The first point of `shp-11-54` (`45.424434, -75.687027`) is exactly the location of the trip's first stop, `10047`.
+- **`shape_dist_traveled` looks shifted by one point.** Points 1→2 and 2→3 are each about 20 m apart, but the values are `0.0`, `0.01`, `20.1` instead of roughly `0`, `20`, `40`. Don't rely on it for precise distances without checking more shapes; computing distance from the coordinates is safer.
+
+### Performance baseline
+
+| Step | Rows | Time | Notes |
+| --- | --- | --- | --- |
+| Read `stop_times.txt`, check `trip_id` only (no database) | 2,901,867 | ~1.1 s | Streaming CSV reader; other columns parsed for one trip only |
+| Read and parse every row into `GtfsStopTime` (no database) | 2,901,867 | ~2.2 s | All 10 columns parsed per row (two times, ints, a double) |
+| Read and parse every row into `GtfsShape` (no database) | 874,720 | ~0.5 s | 5 columns per row |
+
+The second row is the real floor for any import: whatever the database step adds comes on top of about 2.2 s. Parsing every column roughly doubled the time compared with reading alone.
 
 ## Open Decisions
 
@@ -249,7 +310,10 @@ These are **potential classifications**, not guarantees. A vehicle can disappear
 - [x] Record row counts and data quirks for `agency.txt`, `routes.txt`, and `stops.txt`.
 - [x] Confirm the station / platform hierarchy in `stops.txt` (`location_type`, `parent_station`).
 - [x] Record row count and quirks for `trips.txt`.
-- [ ] Record quirks for `calendar.txt`, `calendar_dates.txt`, `stop_times.txt`, and `shapes.txt` as their models are built.
+- [x] Record patterns and quirks for `calendar.txt` and `calendar_dates.txt`.
+- [ ] Confirm which routes use the named (`TCFD`, `CFD`, `TRIL`) services.
+- [x] Record row count, quirks and a parse-time baseline for `stop_times.txt`.
+- [x] Record row count, quirks and a parse-time baseline for `shapes.txt`.
 - [ ] Read the GTFS-Realtime reference and test the live feed once API access is available.
 
 ## Reference

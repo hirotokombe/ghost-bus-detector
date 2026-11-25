@@ -2,6 +2,10 @@ package com.hirokombe.ghostbus.gtfs;
 
 import org.apache.commons.csv.CSVRecord;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+
 public class GtfsRow {
     private final String fileName;
     private final CSVRecord record;
@@ -54,6 +58,14 @@ public class GtfsRow {
         return parseDouble(column, required(column));
     }
 
+    public LocalDate requiredDate(String column) {
+        return parseDate(column, required(column));
+    }
+
+    public boolean requiredBoolean(String column) {
+        return parseBoolean(column, required(column));
+    }
+
     private int parseInt(String column, String value) {
         try {
             return Integer.parseInt(value);
@@ -68,6 +80,23 @@ public class GtfsRow {
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(where(column) + " must be a number: \"" + value + "\"", e);
         }
+    }
+
+    private LocalDate parseDate(String column, String value) {
+        try {
+            return LocalDate.parse(value, DateTimeFormatter.BASIC_ISO_DATE);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(where(column) + " must be a date (YYYYMMDD): \"" + value + "\"", e);
+        }
+    }
+
+    private boolean parseBoolean(String column, String value) {
+        return switch (value) {
+            case "1" -> true;
+            case "0" -> false;
+            default -> throw new IllegalArgumentException(
+                    where(column) + " must be 0 or 1: \"" + value + "\"");
+        };
     }
 
     private String where(String column) {

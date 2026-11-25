@@ -66,6 +66,14 @@ public class GtfsRow {
         return parseBoolean(column, required(column));
     }
 
+    public Integer optionalTime(String column) {
+        String value = optional(column);
+        if (value == null) {
+            return null;
+        }
+        return parseTime(column, value);
+    }
+
     private int parseInt(String column, String value) {
         try {
             return Integer.parseInt(value);
@@ -97,6 +105,15 @@ public class GtfsRow {
             default -> throw new IllegalArgumentException(
                     where(column) + " must be 0 or 1: \"" + value + "\"");
         };
+    }
+
+    private int parseTime(String column, String value) {
+        try {
+            return GtfsTime.toSeconds(value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(where(column) + " must be a time (H:MM:SS): \"" + value + "\"", e);
+        }
+
     }
 
     private String where(String column) {

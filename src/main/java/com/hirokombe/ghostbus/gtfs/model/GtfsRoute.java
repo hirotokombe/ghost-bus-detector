@@ -17,7 +17,8 @@ public record GtfsRoute(String routeId,
                         String networkId) {
 
     public static GtfsRoute from(GtfsRow row) {
-        return new GtfsRoute(row.required("route_id"),
+        return new GtfsRoute(
+                row.required("route_id"),
                 row.required("agency_id"),
                 row.optional("route_short_name"),
                 row.optional("route_long_name"),

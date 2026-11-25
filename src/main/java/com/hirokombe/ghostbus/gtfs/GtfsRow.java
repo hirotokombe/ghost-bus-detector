@@ -42,11 +42,31 @@ public class GtfsRow {
         return parseInt(column, required(column));
     }
 
+    public Double optionalDouble(String column) {
+        String value = optional(column);
+        if (value == null) {
+            return null;
+        }
+        return parseDouble(column, value);
+    }
+
+    public double requiredDouble(String column) {
+        return parseDouble(column, required(column));
+    }
+
     private int parseInt(String column, String value) {
         try {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(where(column) + " must be an integer: \"" + value + "\"", e);
+        }
+    }
+
+    private double parseDouble(String column, String value) {
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(where(column) + " must be a number: \"" + value + "\"", e);
         }
     }
 

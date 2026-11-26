@@ -53,8 +53,15 @@ public class GtfsScheduleWriter {
 
     private static final String INSERT_SHAPE = """
            INSERT INTO shapes (shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence,
-                   shape_dist_traveled) VALUES (?, ?, ?, ?, ?)
+                   shape_dist_traveled)
+           VALUES (?, ?, ?, ?, ?)
            """;
+
+    private static final String INSERT_TRIP = """
+            INSERT INTO trips (trip_id, route_id, service_id, trip_headsign, trip_short_name,
+                direction_id, block_id, shape_id, wheelchair_accessible, bikes_allowed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -158,18 +165,34 @@ public class GtfsScheduleWriter {
                     shape.shapePtLat(),
                     shape.shapePtLon(),
                     shape.shapePtSequence(),
-                    shape.shapeDistTraveled()});
+                    shape.shapeDistTraveled()
+            });
         }
         jdbcTemplate.batchUpdate(INSERT_SHAPE, batch);
     }
 
-    public static void main(String[] args) {
-        boolean rewriteBatchedInserts = true;   // run 1: false, run 2: true
-        String url = "jdbc:postgresql://localhost:15432/ghostbus"
-                + (rewriteBatchedInserts ? "?reWriteBatchedInserts=true" : "");
+    public void insertTrips(List<GtfsTrip> trips) {
+        List<Object[]> batch  = new ArrayList<>();
+        for (GtfsTrip trip : trips) {
+            batch.add(new Object[] {
+                    trip.tripId(),
+                    trip.routeId(),
+                    trip.serviceId(),
+                    trip.tripHeadsign(),
+                    trip.tripShortName(),
+                    trip.directionId(),
+                    trip.blockId(),
+                    trip.shapeId(),
+                    trip.wheelchairAccessible(),
+                    trip.bikesAllowed()
+            });
+        }
+        jdbcTemplate.batchUpdate(INSERT_TRIP, batch);
+    }
 
+    public static void main(String[] args) {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
-                url,
+                "jdbc:postgresql://localhost:15432/ghostbus?reWriteBatchedInserts=true",
                 "ghostbus",
                 System.getenv().getOrDefault("DB_PASSWORD", "localdevpassword"));
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -182,6 +205,7 @@ public class GtfsScheduleWriter {
             // One connection, one commit at the end; any exception undoes everything
             transaction.executeWithoutResult(status -> {
                 // Children before parents
+                jdbcTemplate.update("DELETE FROM trips");
                 jdbcTemplate.update("DELETE FROM routes");
                 jdbcTemplate.update("DELETE FROM agency");
                 jdbcTemplate.update("DELETE FROM stops");
@@ -231,27 +255,43 @@ public class GtfsScheduleWriter {
                     }
 
                     // Second pass: insert the points, 1,000 per batch
-                    List<GtfsShape> batch = new ArrayList<>();
-                    AtomicInteger shapePoints = new AtomicInteger();
+                    List<GtfsShape> shapeBatch = new ArrayList<>();
                     long shapesStart = System.nanoTime();
                     try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/shapes.txt")) {
                         reader.read("shapes.txt", in, row -> {
-                            batch.add(GtfsShape.from(row));
-                            if (batch.size() == 1_000) {
-                                writer.insertShapes(batch);
-                                shapePoints.addAndGet(batch.size());
-                                batch.clear();
+                            shapeBatch.add(GtfsShape.from(row));
+                            if (shapeBatch.size() == 1_000) {
+                                writer.insertShapes(shapeBatch);
+                                shapeBatch.clear();
                             }
                         });
                     }
-                    if (!batch.isEmpty()) {
+                    if (!shapeBatch.isEmpty()) {
                         // The last batch is usually not full
-                        writer.insertShapes(batch);
-                        shapePoints.addAndGet(batch.size());
+                        writer.insertShapes(shapeBatch);
                     }
-                    long shapesMillis = (System.nanoTime() - shapesStart) / 1_000_000;
-                    System.out.println("Inserted " + shapePoints.get() + " shape points in " + shapesMillis
-                            + " ms (reWriteBatchedInserts=" + rewriteBatchedInserts + ")");
+                    System.out.println("Shapes: " + (System.nanoTime() - shapesStart) / 1_000_000 + " ms");
+
+                    // trips reference routes, services and shape_definitions, all loaded above
+                    List<GtfsTrip> tripBatch = new ArrayList<>();
+                    AtomicInteger trips = new AtomicInteger();
+                    long tripsStart = System.nanoTime();
+                    try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/trips.txt")) {
+                        reader.read("trips.txt", in, row -> {
+                            tripBatch.add(GtfsTrip.from(row));
+                            if (tripBatch.size() == 1_000) {
+                                writer.insertTrips(tripBatch);
+                                trips.addAndGet(tripBatch.size());
+                                tripBatch.clear();
+                            }
+                        });
+                    }
+                    if (!tripBatch.isEmpty()) {
+                        writer.insertTrips(tripBatch);
+                        trips.addAndGet(tripBatch.size());
+                    }
+                    System.out.println("Trips: inserted " + trips.get() + " in "
+                            + (System.nanoTime() - tripsStart) / 1_000_000 + " ms");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
@@ -270,15 +310,24 @@ public class GtfsScheduleWriter {
         Integer calendarDateCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar_dates", Integer.class);
         Integer shapeDefinitionCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shape_definitions", Integer.class);
         Integer shapeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shapes", Integer.class);
+        Integer tripCount = jdbcTemplate.queryForObject("SELECT count(*) FROM trips", Integer.class);
         System.out.println("Took " + millis + " ms in total");
         System.out.println("agency=" + agencyCount + ", routes=" + routeCount + ", stops=" + stopCount
                 + ", services=" + serviceCount + ", calendar=" + calendarCount + ", calendar_dates=" + calendarDateCount
-                + ", shape_definitions=" + shapeDefinitionCount + ", shapes=" + shapeCount
-                + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720)");
+                + ", shape_definitions=" + shapeDefinitionCount + ", shapes=" + shapeCount + ", trips=" + tripCount
+                + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720, 73,559)");
 
-        System.out.println("First 3 points of shp-11-54:");
-        jdbcTemplate.queryForList(
-                        "SELECT * FROM shapes WHERE shape_id = 'shp-11-54' ORDER BY shape_pt_sequence LIMIT 3")
+        System.out.println("Trip 10000010:");
+        jdbcTemplate.queryForList("SELECT * FROM trips WHERE trip_id = '10000010'")
                 .forEach(System.out::println);
+
+        System.out.println("Routes that use the named (SEPT26-...) services:");
+        jdbcTemplate.queryForList("""
+            SELECT DISTINCT t.service_id, r.route_short_name, r.route_type
+            FROM trips t
+            JOIN routes r ON r.route_id = t.route_id
+            WHERE t.service_id LIKE 'SEPT26-%'
+            ORDER BY t.service_id, r.route_short_name
+            """).forEach(System.out::println);
     }
 }

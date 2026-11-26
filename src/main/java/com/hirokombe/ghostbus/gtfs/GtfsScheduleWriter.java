@@ -39,6 +39,15 @@ public class GtfsScheduleWriter {
 
     private static final String INSERT_SERVICE = "INSERT INTO services (service_id) VALUES (?)";
 
+    private static final String INSERT_CALENDAR = """
+            INSERT INTO calendar (service_id, monday, tuesday, wednesday, thursday, friday,
+                    saturday, sunday, start_date, end_date)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+
+    private static final String INSERT_CALENDAR_DATE =
+            "INSERT INTO calendar_dates (service_id, date, exception_type) VALUES (?, ?, ?)";
+
     private final JdbcTemplate jdbcTemplate;
 
     public GtfsScheduleWriter(JdbcTemplate jdbcTemplate) {
@@ -108,6 +117,27 @@ public class GtfsScheduleWriter {
         return serviceIds.size();
     }
 
+    public void insertCalendar(GtfsCalendar calendar) {
+        jdbcTemplate.update(INSERT_CALENDAR,
+                calendar.serviceId(),
+                calendar.monday(),
+                calendar.tuesday(),
+                calendar.wednesday(),
+                calendar.thursday(),
+                calendar.friday(),
+                calendar.saturday(),
+                calendar.sunday(),
+                calendar.startDate(),
+                calendar.endDate());
+    }
+
+    public void insertCalendarDate(GtfsCalendarDate calendarDate) {
+        jdbcTemplate.update(INSERT_CALENDAR_DATE,
+                calendarDate.serviceId(),
+                calendarDate.date(),
+                calendarDate.exceptionType());
+    }
+
     public static void main(String[] args) {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:postgresql://localhost:15432/ghostbus",
@@ -122,9 +152,12 @@ public class GtfsScheduleWriter {
         try {
             // One connection, one commit at the end; any exception undoes everything
             transaction.executeWithoutResult(status -> {
+                // Children before parents
                 jdbcTemplate.update("DELETE FROM routes");
                 jdbcTemplate.update("DELETE FROM agency");
                 jdbcTemplate.update("DELETE FROM stops");
+                jdbcTemplate.update("DELETE FROM calendar_dates");
+                jdbcTemplate.update("DELETE FROM calendar");
                 jdbcTemplate.update("DELETE FROM services");
 
                 try {
@@ -148,9 +181,16 @@ public class GtfsScheduleWriter {
                         reader.read("calendar_dates.txt", in, row -> calendarDates.add(GtfsCalendarDate.from(row)));
                     }
 
+                    // Parents first: calendar and calendar_dates reference services
                     int services = writer.insertServices(calendars, calendarDates);
-                    System.out.println("Read " + calendars.size() + " calendar rows and " + calendarDates.size()
-                            + " calendar_dates rows; inserted " + services + " services");
+                    for (GtfsCalendar calendar : calendars) {
+                        writer.insertCalendar(calendar);
+                    }
+                    for (GtfsCalendarDate calendarDate : calendarDates) {
+                        writer.insertCalendarDate(calendarDate);
+                    }
+                    System.out.println("Inserted " + services + " services, " + calendars.size()
+                            + " calendar rows, " + calendarDates.size() + " calendar_dates rows");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
@@ -165,10 +205,24 @@ public class GtfsScheduleWriter {
         Integer routeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM routes", Integer.class);
         Integer stopCount = jdbcTemplate.queryForObject("SELECT count(*) FROM stops", Integer.class);
         Integer serviceCount = jdbcTemplate.queryForObject("SELECT count(*) FROM services", Integer.class);
+        Integer calendarCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar", Integer.class);
+        Integer calendarDateCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar_dates", Integer.class);
         System.out.println("Took " + millis + " ms");
         System.out.println("agency=" + agencyCount + ", routes=" + routeCount + ", stops=" + stopCount
-                + ", services=" + serviceCount + " (expected 1, 178, 5,842, 22)");
-        System.out.println("Service IDs: "
-                + jdbcTemplate.queryForList("SELECT service_id FROM services ORDER BY service_id", String.class));
+                + ", services=" + serviceCount + ", calendar=" + calendarCount + ", calendar_dates=" + calendarDateCount
+                + " (expected 1, 178, 5,842, 22, 18, 52)");
+
+        System.out.println("Service 1 (Sundays, Nov 20 - Dec 19):");
+        jdbcTemplate.queryForList("SELECT * FROM calendar WHERE service_id = '1'")
+                .forEach(System.out::println);
+
+        System.out.println("Service 5 exceptions (removed every Sunday):");
+        jdbcTemplate.queryForList("SELECT * FROM calendar_dates WHERE service_id = '5' ORDER BY date")
+                .forEach(System.out::println);
+
+        System.out.println("Services with no calendar row (only in calendar_dates.txt): "
+                + jdbcTemplate.queryForList(
+                "SELECT service_id FROM services WHERE service_id NOT IN (SELECT service_id FROM calendar) ORDER BY service_id",
+                String.class));
     }
 }

@@ -146,8 +146,8 @@ public class GtfsScheduleWriter {
                 calendarDate.exceptionType());
     }
 
-    public void insertShapeDefinition(String shape) {
-        jdbcTemplate.update(INSERT_SHAPE_DEFINITION, shape);
+    public void insertShapeDefinition(String shapeId) {
+        jdbcTemplate.update(INSERT_SHAPE_DEFINITION, shapeId);
     }
 
     public void insertShapes(List<GtfsShape> shapes) {

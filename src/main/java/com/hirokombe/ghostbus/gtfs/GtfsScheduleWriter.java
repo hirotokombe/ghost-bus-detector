@@ -48,6 +48,8 @@ public class GtfsScheduleWriter {
     private static final String INSERT_CALENDAR_DATE =
             "INSERT INTO calendar_dates (service_id, date, exception_type) VALUES (?, ?, ?)";
 
+    private static final String INSERT_SHAPE_DEFINITION = "INSERT INTO shape_definitions (shape_id) VALUES (?)";
+
     private final JdbcTemplate jdbcTemplate;
 
     public GtfsScheduleWriter(JdbcTemplate jdbcTemplate) {
@@ -138,6 +140,10 @@ public class GtfsScheduleWriter {
                 calendarDate.exceptionType());
     }
 
+    public void insertShapeDefinition(String shape) {
+        jdbcTemplate.update(INSERT_SHAPE_DEFINITION, shape);
+    }
+
     public static void main(String[] args) {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:postgresql://localhost:15432/ghostbus",
@@ -159,6 +165,8 @@ public class GtfsScheduleWriter {
                 jdbcTemplate.update("DELETE FROM calendar_dates");
                 jdbcTemplate.update("DELETE FROM calendar");
                 jdbcTemplate.update("DELETE FROM services");
+                jdbcTemplate.update("DELETE FROM shapes");
+                jdbcTemplate.update("DELETE FROM shape_definitions");
 
                 try {
                     try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/agency.txt")) {
@@ -182,15 +190,23 @@ public class GtfsScheduleWriter {
                     }
 
                     // Parents first: calendar and calendar_dates reference services
-                    int services = writer.insertServices(calendars, calendarDates);
+                    writer.insertServices(calendars, calendarDates);
                     for (GtfsCalendar calendar : calendars) {
                         writer.insertCalendar(calendar);
                     }
                     for (GtfsCalendarDate calendarDate : calendarDates) {
                         writer.insertCalendarDate(calendarDate);
                     }
-                    System.out.println("Inserted " + services + " services, " + calendars.size()
-                            + " calendar rows, " + calendarDates.size() + " calendar_dates rows");
+
+                    // shapes.txt is too big to keep in memory: first pass collects only the IDs
+                    Set<String> shapeIds = new LinkedHashSet<>();
+                    try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/shapes.txt")) {
+                        reader.read("shapes.txt", in, row -> shapeIds.add(row.required("shape_id")));
+                    }
+                    for (String shapeId : shapeIds) {
+                        writer.insertShapeDefinition(shapeId);
+                    }
+                    System.out.println("Found " + shapeIds.size() + " distinct shape_ids in shapes.txt");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
@@ -207,22 +223,15 @@ public class GtfsScheduleWriter {
         Integer serviceCount = jdbcTemplate.queryForObject("SELECT count(*) FROM services", Integer.class);
         Integer calendarCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar", Integer.class);
         Integer calendarDateCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar_dates", Integer.class);
+        Integer shapeDefinitionCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shape_definitions", Integer.class);
         System.out.println("Took " + millis + " ms");
         System.out.println("agency=" + agencyCount + ", routes=" + routeCount + ", stops=" + stopCount
                 + ", services=" + serviceCount + ", calendar=" + calendarCount + ", calendar_dates=" + calendarDateCount
                 + " (expected 1, 178, 5,842, 22, 18, 52)");
+        System.out.println("shape_definitions=" + shapeDefinitionCount);
 
-        System.out.println("Service 1 (Sundays, Nov 20 - Dec 19):");
-        jdbcTemplate.queryForList("SELECT * FROM calendar WHERE service_id = '1'")
-                .forEach(System.out::println);
-
-        System.out.println("Service 5 exceptions (removed every Sunday):");
-        jdbcTemplate.queryForList("SELECT * FROM calendar_dates WHERE service_id = '5' ORDER BY date")
-                .forEach(System.out::println);
-
-        System.out.println("Services with no calendar row (only in calendar_dates.txt): "
-                + jdbcTemplate.queryForList(
-                "SELECT service_id FROM services WHERE service_id NOT IN (SELECT service_id FROM calendar) ORDER BY service_id",
-                String.class));
+        Integer routeElevenShape = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM shape_definitions WHERE shape_id = 'shp-11-54'", Integer.class);
+        System.out.println("shp-11-54 present: " + (routeElevenShape == 1));
     }
 }

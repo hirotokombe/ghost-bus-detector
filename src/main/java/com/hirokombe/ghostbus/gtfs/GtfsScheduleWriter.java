@@ -2,6 +2,8 @@ package com.hirokombe.ghostbus.gtfs;
 
 import com.hirokombe.ghostbus.gtfs.model.GtfsAgency;
 import com.hirokombe.ghostbus.gtfs.model.GtfsRoute;
+import com.hirokombe.ghostbus.gtfs.model.GtfsStop;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -22,6 +24,13 @@ public class GtfsScheduleWriter {
                     route_desc, route_type, route_url, route_color, route_text_color,
                     route_sort_order, continuous_pickup, continuous_drop_off, network_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+
+    private static final String INSERT_STOP = """
+            INSERT INTO stops (stop_id, stop_code, stop_name, tts_stop_name, stop_desc,
+                    stop_lat, stop_lon, zone_id, stop_url, location_type, parent_station,
+                    stop_timezone, wheelchair_boarding, level_id, platform_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
     private final JdbcTemplate jdbcTemplate;
@@ -59,6 +68,25 @@ public class GtfsScheduleWriter {
                 route.networkId());
     }
 
+    public void insertStop(GtfsStop stop) {
+        jdbcTemplate.update(INSERT_STOP,
+                stop.stopId(),
+                stop.stopCode(),
+                stop.stopName(),
+                stop.ttsStopName(),
+                stop.stopDesc(),
+                stop.stopLat(),
+                stop.stopLon(),
+                stop.zoneId(),
+                stop.stopUrl(),
+                stop.locationType(),
+                stop.parentStation(),
+                stop.stopTimezone(),
+                stop.wheelchairBoarding(),
+                stop.levelId(),
+                stop.platformCode());
+    }
+
     public static void main(String[] args) throws Exception {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:postgresql://localhost:15432/ghostbus",
@@ -71,33 +99,28 @@ public class GtfsScheduleWriter {
         // Clear earlier runs, children before parents
         jdbcTemplate.update("DELETE FROM routes");
         jdbcTemplate.update("DELETE FROM agency");
+        jdbcTemplate.update("DELETE FROM stops");
 
-        // Parents first: routes reference agency
         try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/agency.txt")) {
             reader.read("agency.txt", in, row -> writer.insertAgency(GtfsAgency.from(row)));
         }
+        try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/routes.txt")) {
+            reader.read("routes.txt", in, row -> writer.insertRoute(GtfsRoute.from(row)));
+        }
 
         AtomicInteger inserted = new AtomicInteger();
-        long start = System.nanoTime();
-        try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/routes.txt")) {
-            reader.read("routes.txt", in, row -> {
-                writer.insertRoute(GtfsRoute.from(row));
+        try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/stops.txt")) {
+            reader.read("stops.txt", in, row -> {
+                writer.insertStop(GtfsStop.from(row));
                 inserted.incrementAndGet();
             });
+            System.out.println("All " + inserted.get() + " stops inserted");
+        } catch (DataAccessException e) {
+            System.out.println("Insert failed after " + inserted.get() + " stops");
+            System.out.println("Reason: " + e.getMostSpecificCause().getMessage());
         }
-        long millis = (System.nanoTime() - start) / 1_000_000;
 
-        Integer agencyCount = jdbcTemplate.queryForObject("SELECT count(*) FROM agency", Integer.class);
-        Integer routeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM routes", Integer.class);
-        System.out.println("Agency rows: " + agencyCount);
-        System.out.println("Inserted " + inserted.get() + " routes in " + millis + " ms; routes table now has " + routeCount);
-
-        System.out.println("Routes per route_type:");
-        jdbcTemplate.queryForList("SELECT route_type, count(*) FROM routes GROUP BY route_type ORDER BY route_type")
-                .forEach(System.out::println);
-
-        System.out.println("Sample routes:");
-        jdbcTemplate.queryForList("SELECT * FROM routes WHERE route_id IN ('1-373', '11', 'E1')")
-                .forEach(System.out::println);
+        Integer stopCount = jdbcTemplate.queryForObject("SELECT count(*) FROM stops", Integer.class);
+        System.out.println("stops table now has " + stopCount + " rows (file has 5,842)");
     }
 }

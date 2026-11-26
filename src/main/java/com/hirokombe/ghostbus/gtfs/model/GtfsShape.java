@@ -6,7 +6,7 @@ public record GtfsShape(String shapeId,
                         int shapePtSequence,
                         double shapePtLat,
                         double shapePtLon,
-                        double shapeDistTraveled) {
+                        Double shapeDistTraveled) {
 
     public static GtfsShape from(GtfsRow row) {
         return new GtfsShape(

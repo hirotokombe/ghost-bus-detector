@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class GtfsScheduleWriter {
 
@@ -49,6 +50,11 @@ public class GtfsScheduleWriter {
             "INSERT INTO calendar_dates (service_id, date, exception_type) VALUES (?, ?, ?)";
 
     private static final String INSERT_SHAPE_DEFINITION = "INSERT INTO shape_definitions (shape_id) VALUES (?)";
+
+    private static final String INSERT_SHAPE = """
+           INSERT INTO shapes (shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence,
+                   shape_dist_traveled) VALUES (?, ?, ?, ?, ?)
+           """;
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -144,9 +150,26 @@ public class GtfsScheduleWriter {
         jdbcTemplate.update(INSERT_SHAPE_DEFINITION, shape);
     }
 
+    public void insertShapes(List<GtfsShape> shapes) {
+        List<Object[]> batch = new ArrayList<>();
+        for (GtfsShape shape : shapes) {
+            batch.add(new Object[] {
+                    shape.shapeId(),
+                    shape.shapePtLat(),
+                    shape.shapePtLon(),
+                    shape.shapePtSequence(),
+                    shape.shapeDistTraveled()});
+        }
+        jdbcTemplate.batchUpdate(INSERT_SHAPE, batch);
+    }
+
     public static void main(String[] args) {
+        boolean rewriteBatchedInserts = true;   // run 1: false, run 2: true
+        String url = "jdbc:postgresql://localhost:15432/ghostbus"
+                + (rewriteBatchedInserts ? "?reWriteBatchedInserts=true" : "");
+
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
-                "jdbc:postgresql://localhost:15432/ghostbus",
+                url,
                 "ghostbus",
                 System.getenv().getOrDefault("DB_PASSWORD", "localdevpassword"));
         JdbcTemplate jdbcTemplate = new JdbcTemplate(dataSource);
@@ -206,7 +229,29 @@ public class GtfsScheduleWriter {
                     for (String shapeId : shapeIds) {
                         writer.insertShapeDefinition(shapeId);
                     }
-                    System.out.println("Found " + shapeIds.size() + " distinct shape_ids in shapes.txt");
+
+                    // Second pass: insert the points, 1,000 per batch
+                    List<GtfsShape> batch = new ArrayList<>();
+                    AtomicInteger shapePoints = new AtomicInteger();
+                    long shapesStart = System.nanoTime();
+                    try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/shapes.txt")) {
+                        reader.read("shapes.txt", in, row -> {
+                            batch.add(GtfsShape.from(row));
+                            if (batch.size() == 1_000) {
+                                writer.insertShapes(batch);
+                                shapePoints.addAndGet(batch.size());
+                                batch.clear();
+                            }
+                        });
+                    }
+                    if (!batch.isEmpty()) {
+                        // The last batch is usually not full
+                        writer.insertShapes(batch);
+                        shapePoints.addAndGet(batch.size());
+                    }
+                    long shapesMillis = (System.nanoTime() - shapesStart) / 1_000_000;
+                    System.out.println("Inserted " + shapePoints.get() + " shape points in " + shapesMillis
+                            + " ms (reWriteBatchedInserts=" + rewriteBatchedInserts + ")");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
@@ -224,14 +269,16 @@ public class GtfsScheduleWriter {
         Integer calendarCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar", Integer.class);
         Integer calendarDateCount = jdbcTemplate.queryForObject("SELECT count(*) FROM calendar_dates", Integer.class);
         Integer shapeDefinitionCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shape_definitions", Integer.class);
-        System.out.println("Took " + millis + " ms");
+        Integer shapeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shapes", Integer.class);
+        System.out.println("Took " + millis + " ms in total");
         System.out.println("agency=" + agencyCount + ", routes=" + routeCount + ", stops=" + stopCount
                 + ", services=" + serviceCount + ", calendar=" + calendarCount + ", calendar_dates=" + calendarDateCount
-                + " (expected 1, 178, 5,842, 22, 18, 52)");
-        System.out.println("shape_definitions=" + shapeDefinitionCount);
+                + ", shape_definitions=" + shapeDefinitionCount + ", shapes=" + shapeCount
+                + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720)");
 
-        Integer routeElevenShape = jdbcTemplate.queryForObject(
-                "SELECT count(*) FROM shape_definitions WHERE shape_id = 'shp-11-54'", Integer.class);
-        System.out.println("shp-11-54 present: " + (routeElevenShape == 1));
+        System.out.println("First 3 points of shp-11-54:");
+        jdbcTemplate.queryForList(
+                        "SELECT * FROM shapes WHERE shape_id = 'shp-11-54' ORDER BY shape_pt_sequence LIMIT 3")
+                .forEach(System.out::println);
     }
 }

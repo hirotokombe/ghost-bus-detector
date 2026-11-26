@@ -51,7 +51,7 @@ The schedule loader is kept in its own package (`gtfs`) with no ghost-bus logic 
 | Language / framework | Java 25, Spring Boot 4.2 |
 | Database | PostgreSQL 17 + PostGIS, in Docker |
 | Schema migrations | Flyway |
-| Data access | `JdbcTemplate` and transactions for bulk loading (JPA, batch inserts and PostgreSQL `COPY` to be compared) |
+| Data access | `JdbcTemplate` with transactions and batch inserts for bulk loading (JPA and PostgreSQL `COPY` to be compared on `stop_times`) |
 | CSV parsing | Apache Commons CSV, streamed row by row |
 | Realtime feed | MobilityData `gtfs-realtime-bindings` (Protocol Buffers) |
 | Tests | JUnit 5, Testcontainers |
@@ -171,15 +171,17 @@ From [`docs/NOTES.md`](docs/NOTES.md). Local development machine; only numbers a
 | Parse all of `stop_times.txt` into Java records (no database) | 2,901,867 | ~2.2 s |
 | Insert routes one row at a time, a new connection and commit per row | 178 | ~1.7 s (~9.4 ms/row) |
 | Insert agency, routes and stops one row at a time inside one transaction | 6,021 | ~3.5 s (~0.59 ms/row) |
+| Insert shape points with `batchUpdate` (1,000 rows per batch) | 874,720 | ~14.4 s (~0.016 ms/row) |
+| Same, with the PostgreSQL driver's `reWriteBatchedInserts=true` | 874,720 | ~9.4 s (~0.011 ms/row) |
 
-Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. That's still too slow for the 2.9 million `stop_times` rows, so batch inserts and PostgreSQL `COPY` are next to be measured.
+Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. Batching went much further: at the row-by-row rate, the 874,720 shape points would take roughly 8.6 minutes (an estimate), but `batchUpdate` loaded them in 14.4 s, and in 9.4 s once the driver rewrote each batch into multi-row `INSERT`s. Next: the 2.9 million `stop_times` rows, comparing JPA `saveAll`, `batchUpdate` and PostgreSQL `COPY`.
 
 ## Roadmap
 
 - [x] Setup: Spring Boot, PostgreSQL + PostGIS in Docker, Flyway
 - [x] Study the OC Transpo GTFS static data ([`docs/NOTES.md`](docs/NOTES.md))
 - [x] Database schema and indexes ([`docs/DATABASE.md`](docs/DATABASE.md))
-- [ ] **Static schedule loader** (in progress: parsing done; agency, routes, stops and services load in one transaction)
+- [ ] **Static schedule loader** (in progress: parsing done; agency, routes, stops, services, calendars and shapes load in one transaction; trips and stop times next)
 - [ ] Today's planned service (calendar rules, overnight trips, daylight-saving days)
 - [ ] Realtime poller (waiting on OC Transpo API access)
 - [ ] Trip state engine

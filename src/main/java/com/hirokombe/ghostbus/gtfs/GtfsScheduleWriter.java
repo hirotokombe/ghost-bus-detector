@@ -63,6 +63,12 @@ public class GtfsScheduleWriter {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
+    private static final String INSERT_STOP_TIME = """
+            INSERT INTO stop_times (trip_id, stop_sequence, stop_id, arrival_time_seconds, departure_time_seconds,
+                stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+
     private final JdbcTemplate jdbcTemplate;
 
     public GtfsScheduleWriter(JdbcTemplate jdbcTemplate) {
@@ -190,6 +196,25 @@ public class GtfsScheduleWriter {
         jdbcTemplate.batchUpdate(INSERT_TRIP, batch);
     }
 
+    public void insertStopTimes(List<GtfsStopTime> stopTimes) {
+        List<Object[]> batch = new ArrayList<>();
+        for (GtfsStopTime stopTime : stopTimes) {
+            batch.add(new Object[] {
+                    stopTime.tripId(),
+                    stopTime.stopSequence(),
+                    stopTime.stopId(),
+                    stopTime.arrivalTimeSeconds(),
+                    stopTime.departureTimeSeconds(),
+                    stopTime.stopHeadsign(),
+                    stopTime.pickupType(),
+                    stopTime.dropOffType(),
+                    stopTime.shapeDistTraveled(),
+                    stopTime.timepoint()
+            });
+        }
+        jdbcTemplate.batchUpdate(INSERT_STOP_TIME, batch);
+    }
+
     public static void main(String[] args) {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:postgresql://localhost:15432/ghostbus?reWriteBatchedInserts=true",
@@ -204,16 +229,13 @@ public class GtfsScheduleWriter {
         try {
             // One connection, one commit at the end; any exception undoes everything
             transaction.executeWithoutResult(status -> {
-                // Children before parents
-                jdbcTemplate.update("DELETE FROM trips");
-                jdbcTemplate.update("DELETE FROM routes");
-                jdbcTemplate.update("DELETE FROM agency");
-                jdbcTemplate.update("DELETE FROM stops");
-                jdbcTemplate.update("DELETE FROM calendar_dates");
-                jdbcTemplate.update("DELETE FROM calendar");
-                jdbcTemplate.update("DELETE FROM services");
-                jdbcTemplate.update("DELETE FROM shapes");
-                jdbcTemplate.update("DELETE FROM shape_definitions");
+                // Empty every schedule table at once; tables that reference each other must be in the same statement
+                long truncateStart = System.nanoTime();
+                jdbcTemplate.execute("""
+                    TRUNCATE stop_times, trips, routes, agency, stops,
+                             calendar_dates, calendar, services, shapes, shape_definitions
+                    """);
+                System.out.println("Truncate: " + (System.nanoTime() - truncateStart) / 1_000_000 + " ms");
 
                 try {
                     try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/agency.txt")) {
@@ -274,24 +296,41 @@ public class GtfsScheduleWriter {
 
                     // trips reference routes, services and shape_definitions, all loaded above
                     List<GtfsTrip> tripBatch = new ArrayList<>();
-                    AtomicInteger trips = new AtomicInteger();
                     long tripsStart = System.nanoTime();
                     try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/trips.txt")) {
                         reader.read("trips.txt", in, row -> {
                             tripBatch.add(GtfsTrip.from(row));
                             if (tripBatch.size() == 1_000) {
                                 writer.insertTrips(tripBatch);
-                                trips.addAndGet(tripBatch.size());
                                 tripBatch.clear();
                             }
                         });
                     }
                     if (!tripBatch.isEmpty()) {
                         writer.insertTrips(tripBatch);
-                        trips.addAndGet(tripBatch.size());
                     }
-                    System.out.println("Trips: inserted " + trips.get() + " in "
-                            + (System.nanoTime() - tripsStart) / 1_000_000 + " ms");
+                    System.out.println("Trips: " + (System.nanoTime() - tripsStart) / 1_000_000 + " ms");
+
+                    // stop_times reference trips and stops, both loaded above
+                    List<GtfsStopTime> stopTimeBatch = new ArrayList<>();
+                    AtomicInteger stopTimes = new AtomicInteger();
+                    long stopTimesStart = System.nanoTime();
+                    try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/stop_times.txt")) {
+                        reader.read("stop_times.txt", in, row -> {
+                            stopTimeBatch.add(GtfsStopTime.from(row));
+                            if (stopTimeBatch.size() == 1_000) {
+                                writer.insertStopTimes(stopTimeBatch);
+                                stopTimes.addAndGet(stopTimeBatch.size());
+                                stopTimeBatch.clear();
+                            }
+                        });
+                    }
+                    if (!stopTimeBatch.isEmpty()) {
+                        writer.insertStopTimes(stopTimeBatch);
+                        stopTimes.addAndGet(stopTimeBatch.size());
+                    }
+                    System.out.println("Stop times (batchUpdate): sent " + stopTimes.get() + " in "
+                            + (System.nanoTime() - stopTimesStart) / 1_000_000 + " ms");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
                 }
@@ -311,23 +350,12 @@ public class GtfsScheduleWriter {
         Integer shapeDefinitionCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shape_definitions", Integer.class);
         Integer shapeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM shapes", Integer.class);
         Integer tripCount = jdbcTemplate.queryForObject("SELECT count(*) FROM trips", Integer.class);
+        Integer stopTimeCount = jdbcTemplate.queryForObject("SELECT count(*) FROM stop_times", Integer.class);
         System.out.println("Took " + millis + " ms in total");
         System.out.println("agency=" + agencyCount + ", routes=" + routeCount + ", stops=" + stopCount
                 + ", services=" + serviceCount + ", calendar=" + calendarCount + ", calendar_dates=" + calendarDateCount
                 + ", shape_definitions=" + shapeDefinitionCount + ", shapes=" + shapeCount + ", trips=" + tripCount
-                + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720, 73,559)");
-
-        System.out.println("Trip 10000010:");
-        jdbcTemplate.queryForList("SELECT * FROM trips WHERE trip_id = '10000010'")
-                .forEach(System.out::println);
-
-        System.out.println("Routes that use the named (SEPT26-...) services:");
-        jdbcTemplate.queryForList("""
-            SELECT DISTINCT t.service_id, r.route_short_name, r.route_type
-            FROM trips t
-            JOIN routes r ON r.route_id = t.route_id
-            WHERE t.service_id LIKE 'SEPT26-%'
-            ORDER BY t.service_id, r.route_short_name
-            """).forEach(System.out::println);
+                + ", stop_times=" + stopTimeCount
+                + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720, 73,559, 2,901,867)");
     }
 }

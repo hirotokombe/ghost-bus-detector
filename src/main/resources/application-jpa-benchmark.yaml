@@ -4,7 +4,12 @@ spring:
   docker:
     compose:
       enabled: false             # use the database you started yourself; don't start or stop containers
+  datasource:
+    url: jdbc:postgresql://localhost:15432/ghostbus?reWriteBatchedInserts=true   # same driver setting as the batchUpdate runs
   jpa:
     properties:
       hibernate:
-        generate_statistics: true   # Hibernate prints how many SQL statements it sent
+        generate_statistics: true   # count statements (read in code by the benchmark)
+        jdbc:
+          batch_size: 1000          # group up to 1,000 INSERTs into one batch
+        order_inserts: true         # sort pending INSERTs by table so batches stay full

@@ -5,11 +5,12 @@ import jakarta.persistence.Entity;
 import jakarta.persistence.Id;
 import jakarta.persistence.IdClass;
 import jakarta.persistence.Table;
+import org.springframework.data.domain.Persistable;
 
 @Entity
 @Table(name = "stop_times")
 @IdClass(StopTimeKey.class)
-public class StopTimeEntity {
+public class StopTimeEntity implements Persistable<StopTimeKey> {
 
     @Id
     private String tripId;
@@ -54,5 +55,15 @@ public class StopTimeEntity {
                 stopTime.shapeDistTraveled(),
                 stopTime.timepoint()
         );
+    }
+
+    @Override
+    public StopTimeKey getId() {
+        return new StopTimeKey(tripId, stopSequence);
+    }
+
+    @Override
+    public boolean isNew() {
+        return true;
     }
 }

@@ -1,0 +1,10 @@
+spring:
+  main:
+    web-application-type: none   # no web server: start, run the benchmark, exit
+  docker:
+    compose:
+      enabled: false             # use the database you started yourself; don't start or stop containers
+  jpa:
+    properties:
+      hibernate:
+        generate_statistics: true   # Hibernate prints how many SQL statements it sent

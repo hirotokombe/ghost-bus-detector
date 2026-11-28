@@ -51,7 +51,7 @@ The schedule loader is kept in its own package (`gtfs`) with no ghost-bus logic 
 | Language / framework | Java 25, Spring Boot 4.2 |
 | Database | PostgreSQL 17 + PostGIS, in Docker |
 | Schema migrations | Flyway |
-| Data access | `JdbcTemplate` with transactions and batch inserts for bulk loading (JPA and PostgreSQL `COPY` to be compared on `stop_times`) |
+| Data access | `JdbcTemplate` with transactions, batch inserts and PostgreSQL `COPY` for bulk loading (compared against JPA `saveAll`) |
 | CSV parsing | Apache Commons CSV, streamed row by row |
 | Realtime feed | MobilityData `gtfs-realtime-bindings` (Protocol Buffers) |
 | Tests | JUnit 5, Testcontainers |
@@ -173,15 +173,22 @@ From [`docs/NOTES.md`](docs/NOTES.md). Local development machine; only numbers a
 | Insert agency, routes and stops one row at a time inside one transaction | 6,021 | ~3.5 s (~0.59 ms/row) |
 | Insert shape points with `batchUpdate` (1,000 rows per batch) | 874,720 | ~14.4 s (~0.016 ms/row) |
 | Same, with the PostgreSQL driver's `reWriteBatchedInserts=true` | 874,720 | ~9.4 s (~0.011 ms/row) |
+| Insert trips the same way | 73,559 | ~1 s |
+| Insert stop times the same way | 2,901,867 | ~33 s |
+| Load stop times with PostgreSQL `COPY` instead | 2,901,867 | **~25–28 s** |
+| Load stop times with plain JPA `saveAll` (measured on 100,000 rows, then estimated) | 2,901,867 | ~63 min (estimate) |
+| **Load the whole schedule** (clear with `TRUNCATE`, then every table, one transaction; `COPY` for stop times) | 3,856,963 | **~38–43 s** |
+| Clear the old schedule first with `DELETE` (all tables full) | 3,856,963 | 247 s (243 s of it in one table) |
+| Clear it with one `TRUNCATE` instead | 3,856,963 | 0.02 s |
 
-Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. Batching went much further: at the row-by-row rate, the 874,720 shape points would take roughly 8.6 minutes (an estimate), but `batchUpdate` loaded them in 14.4 s, and in 9.4 s once the driver rewrote each batch into multi-row `INSERT`s. Next: the 2.9 million `stop_times` rows, comparing JPA `saveAll`, `batchUpdate` and PostgreSQL `COPY`.
+Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. Batching went much further: at the row-by-row rate, the 874,720 shape points would take roughly 8.6 minutes (an estimate), but `batchUpdate` loaded them in 14.4 s, and in 9.4 s once the driver rewrote each batch into multi-row `INSERT`s. The whole schedule (3.86 million rows) now loads in about 50 seconds. Clearing the old schedule turned out to matter as much as loading the new one: `DELETE FROM stops` took 243 s, because each deleted stop made PostgreSQL scan the 2.9 million `stop_times` rows for references. One `TRUNCATE` of all schedule tables takes 0.02 s, which brought a full reload from 249 s back to about 46 s. On the 2.9 million `stop_times` rows, PostgreSQL `COPY` took ~25–28 s against ~33 s for `batchUpdate`, about a fifth less; both still pay for parsing and for two foreign-key checks per row. Plain JPA `saveAll`, the default in most Spring apps, took 130.5 s for just 100,000 of those rows, putting a full load at roughly an hour: about 115 times slower than `batchUpdate`. Next: confirm why (most likely a `SELECT` before every `INSERT`, because the IDs are assigned by the feed) and measure JPA again with that fixed.
 
 ## Roadmap
 
 - [x] Setup: Spring Boot, PostgreSQL + PostGIS in Docker, Flyway
 - [x] Study the OC Transpo GTFS static data ([`docs/NOTES.md`](docs/NOTES.md))
 - [x] Database schema and indexes ([`docs/DATABASE.md`](docs/DATABASE.md))
-- [ ] **Static schedule loader** (in progress: parsing done; agency, routes, stops, services, calendars and shapes load in one transaction; trips and stop times next)
+- [ ] **Static schedule loader** (in progress: parsing done; the whole schedule reloads in one transaction in about 40 s; next: COPY vs JPA comparison and the real import flow)
 - [ ] Today's planned service (calendar rules, overnight trips, daylight-saving days)
 - [ ] Realtime poller (waiting on OC Transpo API access)
 - [ ] Trip state engine

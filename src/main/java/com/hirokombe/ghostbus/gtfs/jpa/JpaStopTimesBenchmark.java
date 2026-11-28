@@ -1,0 +1,84 @@
+package com.hirokombe.ghostbus.gtfs.jpa;
+
+import com.hirokombe.ghostbus.gtfs.GtfsCsvReader;
+import com.hirokombe.ghostbus.gtfs.model.GtfsStopTime;
+import jakarta.persistence.EntityManager;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.annotation.Profile;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+// Times JPA saveAll on a sample of stop_times, then rolls back. Runs only with the jpa-benchmark profile.
+@Component
+@Profile("jpa-benchmark")
+public class JpaStopTimesBenchmark implements CommandLineRunner {
+
+    private static final int SAMPLE_SIZE = 100_000;
+    private static final long FILE_ROWS = 2_901_867;
+
+    private final StopTimeRepository repository;
+    private final EntityManager entityManager;
+    private final JdbcTemplate jdbcTemplate;
+    private final TransactionTemplate transaction;
+
+    public JpaStopTimesBenchmark(StopTimeRepository repository, EntityManager entityManager,
+                                 JdbcTemplate jdbcTemplate, PlatformTransactionManager transactionManager) {
+        this.repository = repository;
+        this.entityManager = entityManager;
+        this.jdbcTemplate = jdbcTemplate;
+        this.transaction = new TransactionTemplate(transactionManager);
+    }
+
+    @Override
+    public void run(String... args) {
+        GtfsCsvReader reader = new GtfsCsvReader();
+
+        transaction.executeWithoutResult(status -> {
+            // Nothing references stop_times, so it can be truncated on its own
+            jdbcTemplate.execute("TRUNCATE stop_times");
+
+            List<StopTimeEntity> batch = new ArrayList<>();
+            AtomicInteger saved = new AtomicInteger();
+            long start = System.nanoTime();
+            try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/stop_times.txt")) {
+                reader.read("stop_times.txt", in, row -> {
+                    if (saved.get() >= SAMPLE_SIZE) {
+                        return; // sample is full; skip the rest of the file
+                    }
+                    batch.add(StopTimeEntity.from(GtfsStopTime.from(row)));
+                    if (batch.size() == 1_000) {
+                        repository.saveAll(batch);
+                        entityManager.flush(); // send this batch's SQL now
+                        entityManager.clear(); // forget saved entities so memory stays flat
+                        saved.addAndGet(batch.size());
+                        batch.clear();
+                    }
+                });
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+            long millis = (System.nanoTime() - start) / 1_000_000;
+
+            Long inTable = jdbcTemplate.queryForObject("SELECT count(*) FROM stop_times", Long.class);
+            System.out.println("JPA saveAll: " + saved.get() + " rows in " + millis + " ms ("
+                    + inTable + " in the table)");
+            System.out.println("Estimate for all " + FILE_ROWS + " rows: ~"
+                    + millis * FILE_ROWS / saved.get() / 1000 + " s");
+
+            status.setRollbackOnly(); // undo the test, keep the real data
+        });
+
+        Long afterRollback = jdbcTemplate.queryForObject("SELECT count(*) FROM stop_times", Long.class);
+        System.out.println("After rollback: stop_times=" + afterRollback + " (expected 2,901,867)");
+    }
+}

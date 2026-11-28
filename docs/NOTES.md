@@ -138,6 +138,8 @@ Knowing the last observed vehicle position relative to the destination might lat
 
 These are the expected row counts for the database tables after an import. `stop_times.txt` is too large for one Excel worksheet.
 
+**Confirmed in the database:** `agency` (1), `routes` (178) and `stops` (5,842) load with exactly these counts. `services` (no file of its own) has **22** rows: see Calendar. `calendar` (18) and `calendar_dates` (52) also match. `shape_definitions` (no file of its own) has **704** rows: see Shapes. `shapes` (874,720), `trips` (73,559) and `stop_times` (2,901,867) match. **Every table now loads with the expected count.**
+
 ### File format
 
 - Files are UTF-8. French accents (e.g. `DU PORTAGE / DE L' HÔTEL-DE-VILLE`) read correctly only when UTF-8 is specified explicitly.
@@ -163,6 +165,8 @@ These are the expected row counts for the database tables after an import. `stop
 - `route_sort_order` is empty for the three O-Train lines and filled in for every bus route.
 - `route_desc`, `route_url`, and `network_id` are empty on every route.
 - `continuous_pickup` and `continuous_drop_off` are `1` on every route.
+- **Every `route_type` is `0` (3 routes) or `3` (175 routes)**, so all fit the V1 `CHECK` list. Confirmed by inserting all 178 routes.
+- **Every route has `agency_id = 1`**, matching the single agency. Confirmed by the `NOT NULL` and foreign-key checks during the insert.
 
 ### Stops
 
@@ -181,7 +185,8 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 - **`stop_code` is shared** by a station and all its platforms (e.g. `3009_stn`, `9833` and `CD990` all have `stop_code = 3009`). It's the number riders see; `stop_id` is the unique key.
 - **O-Train platform IDs** are two letters plus digits (`CD990`, `NA998`, `RF995`). Their names contain `O-TRAIN`, often with a direction (`WEST / OUEST`, `NORTH / NORD`).
 - `platform_code` holds the platform letter or number (`A`, `2A`, `1`) when there is one, and is empty for drop-off-only stops and some O-Train platforms.
-- **Children appear before their parent station in the file** (e.g. `9833`–`CD995` are listed around `3009_stn`, some before it). This is why the `parent_station` foreign key is `DEFERRABLE INITIALLY DEFERRED`: a row-by-row check would fail on the first platform.
+- **Children appear before their parent station in the file** (e.g. `9833`–`CD995` are listed around `3009_stn`, some before it). This is why the `parent_station` foreign key is `DEFERRABLE INITIALLY DEFERRED`.
+- **Confirmed by loading without a transaction:** the 2,029th stop in `stops.txt` has `parent_station = 3000_stn` before `3000_stn` itself appears. A row-by-row, auto-committed insert fails there on `stops_parent_station_fkey` and leaves 2,028 rows behind. Inside one transaction, all 5,842 stops load, because the deferred check runs at commit.
 - `location_type` is sometimes written as `0` and sometimes left **empty** on ordinary stops. Both mean 0; the loader turns empty into 0, because the database column is `NOT NULL`.
 - `tts_stop_name`, `stop_desc`, `zone_id`, `stop_url`, `stop_timezone`, `wheelchair_boarding` and `level_id` are empty on every station and platform checked.
 - All stops have coordinates in the Ottawa area (around `45.x, -75.x`).
@@ -193,6 +198,8 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 - **`block_id`** groups the trips that one vehicle runs one after another (e.g. `11-07` for trip `10000010`). If an earlier trip in a block runs very late, the next trip in that block may start late too. This could help explain some "missing" trips later.
 - `direction_id` is filled in (`0` or `1`), so trips on a route can be split by direction.
 - `trip_short_name` is empty on the trip checked.
+- **Confirmed in the database:** trip `10000010` reads back as route `11`, service `1`, headsign Lincoln Fields, direction `1`, block `11-07`, shape `shp-11-54`, with `wheelchair_accessible = 1` and `bikes_allowed = 1`.
+- **All 73,559 trips passed the foreign keys:** every trip's `route_id` and `service_id` exists, and every non-empty `shape_id` exists in `shape_definitions`.
 
 ### Calendar
 
@@ -216,11 +223,16 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 | `SEPT26-TCFDSat-Saturday-01`, `SEPT26-TRILSAT-Saturday-02` | Saturday | Nov 28 – Dec 19 |
 
 - Each **numbered** service runs on exactly one day of the week. There is no single "weekday" bus service.
-- The **named** services likely belong to the O-Train (`TCFD`/`CFD` = Confederation Line 1?, `TRIL` = Trillium Line 2?). **To confirm** by checking which `route_id`s in `trips.txt` use them.
+- **Confirmed: the named services belong only to the O-Train** (every trip using them has `route_type = 0`). Checked by joining `trips` to `routes` in the database:
+  - `TCFD…` and `CFD…` services are used only by **Line 1** (Confederation), including the four `CFD…-03` replacement services.
+  - `TRIL…` services are used only by **Lines 2 and 4** (Trillium and the airport line).
+  - Not checked yet: whether any O-Train trip also uses a numbered service.
 
 **`calendar_dates.txt` (52 exceptions) changes the picture a lot:**
 
 - **Four `service_id`s exist only in `calendar_dates.txt`**, with no row in `calendar.txt`: `SEPT26-CFDFri-Weekday-03`, `SEPT26-CFDSA-Saturday-03`, `SEPT26-CFDSU-Sunday-03`, `SEPT26-CFDMTh-Weekday-03`. They run only on the dates where they are ADDED. This is why the schema has a separate `services` table built from both files.
+- **Confirmed in the database: `services` has 22 rows.** That's the 18 IDs in `calendar.txt` plus the 4 that exist only in `calendar_dates.txt`. The 52 rows of `calendar_dates.txt` use 16 different `service_id`s (e.g. `SEPT26-TCFDFri-Weekday-02` appears 16 times). `SEPT26-TRILSUN-Sunday-02` and the numbered services `1`, `3`, `4`, `9`, `10` appear only in `calendar.txt`.
+- **Confirmed in the database: both calendar files pass the V1 checks.** All 18 `calendar` rows have `start_date <= end_date`; all 52 `calendar_dates` rows have `exception_type` 1 or 2, and no `(service_id, date)` pair repeats. Read back from the database: service `1` is Sunday-only from 2026-11-20 to 2026-12-19, and service `5` has exactly four removals (Nov 22, Nov 29, Dec 6, Dec 13). The only services with no `calendar` row are the four `CFD…-03` services.
 - **Some services never run at all once exceptions are applied:**
   - `5` (Sunday) is REMOVED on every Sunday in its range (Nov 22, 29, Dec 6, 13).
   - `2` (Thursday) is REMOVED on every Thursday in its range (Nov 26, Dec 3, 10, 17).
@@ -240,11 +252,15 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 - **Times are filled in at non-timepoint stops too.** The first stop of trip `10000010` has `timepoint = 1` and the next stops `timepoint = 0`, yet all have times. Only timepoints are times the bus is held to; the rest are OC Transpo's estimates.
 - **`shape_dist_traveled` is filled in** and looks like metres along the shape (`0.0`, `516.49`, `1153.94` for the first three stops). It could help later to measure how far along its route a vehicle was when it disappeared.
 - The first stop has `drop_off_type = 1` (no drop-off), as expected at the start of a trip.
+- **Confirmed in the database:** trip `10000010` has 55 `stop_times` rows. The first (sequence 1, stop `10047`, 82080 s) and last (sequence 55, stop `10160`, 84900 s = 23:35:00) match the trace. The last stop has `pickup_type = 1` (no pickup at the end of the trip, mirroring `drop_off_type = 1` at the start), and `shape_dist_traveled = 15237.1`, so the trip is about 15.2 km if the unit is metres (to confirm).
 - `stop_times` uses **platform-level `stop_id`s**: the trip stops at `9449` (MACKENZIE KING A), `9868` (PARLIAMENT B), `9945` (TUNNEY'S PASTURE D) and ends at `10160` (LINCOLN FIELDS 4B), all children of `_stn` stations.
 
 ### Shapes
 
 - 874,720 points in total.
+- **704 distinct `shape_id`s**, so about 1,240 points per shape on average. Confirmed by loading `shape_definitions`; `shp-11-54` is among them.
+- **Two `shape_id` styles:** plain numbers (`10716`, `10736`, `10783` in `shapes_sample.csv`) and `shp-<route>-<n>` (`shp-11-54`). Store as text.
+- **`shape_dist_traveled` is empty on some shapes and filled on others.** Confirmed: the first data row of `shapes.txt` (line 2) has no value, and all 1,000 rows of `shapes_sample.csv` (shapes `10716`, `10736`, `10783`) are empty, while `shp-11-54` has values. The column must stay optional (`Double` in Java, nullable in the database).
 - The first point of `shp-11-54` (`45.424434, -75.687027`) is exactly the location of the trip's first stop, `10047`.
 - **`shape_dist_traveled` looks shifted by one point.** Points 1→2 and 2→3 are each about 20 m apart, but the values are `0.0`, `0.01`, `20.1` instead of roughly `0`, `20`, `40`. Don't rely on it for precise distances without checking more shapes; computing distance from the coordinates is safer.
 
@@ -255,8 +271,39 @@ GTFS marks the kind of location with `location_type` (0 = stop/platform, 1 = sta
 | Read `stop_times.txt`, check `trip_id` only (no database) | 2,901,867 | ~1.1 s | Streaming CSV reader; other columns parsed for one trip only |
 | Read and parse every row into `GtfsStopTime` (no database) | 2,901,867 | ~2.2 s | All 10 columns parsed per row (two times, ints, a double) |
 | Read and parse every row into `GtfsShape` (no database) | 874,720 | ~0.5 s | 5 columns per row |
+| Insert `routes.txt` one row per `JdbcTemplate.update`, no transaction | 178 | ~1.7 s | ~9.4 ms/row. `DriverManagerDataSource` (no pool): a new connection and a commit for every row |
+| Insert `agency` + `routes` + `stops` one row at a time inside **one transaction** | 6,021 | ~3.5–3.6 s | ~0.59 ms/row, about 16× faster per row. One connection and one commit (`TransactionTemplate`). Three runs: 3,550 / 3,474 / 3,643 ms |
+| Insert `shapes` with `JdbcTemplate.batchUpdate`, 1,000 rows per batch, one transaction | 874,720 | ~14.4 s | ~0.016 ms/row. Includes re-reading and parsing `shapes.txt`. One run: 14,430 ms |
+| Same, with `reWriteBatchedInserts=true` on the JDBC URL | 874,720 | ~9.4 s | ~0.011 ms/row, about 35% less time than without it. One run: 9,375 ms. Later runs: 7.1–7.8 s |
+| Insert `trips` with `batchUpdate` + `reWriteBatchedInserts=true`, 1,000 per batch | 73,559 | ~0.95 s | ~0.013 ms/row. One run: 951 ms. Whole load without `stop_times`: ~13.3 s |
+| Insert `stop_times` with `batchUpdate` + `reWriteBatchedInserts=true`, 1,000 per batch | 2,901,867 | ~34–40 s | ~0.012–0.014 ms/row, including parsing (~2.2 s of it). Two runs: 33,559 / 39,991 ms |
+| **Whole schedule**, every table, one transaction, starting with `stop_times` empty | 3,856,963 | ~50 s | One run: 49,717 ms |
+| Whole schedule, all tables full at the start, cleared with one `TRUNCATE` | 3,856,963 | ~46 s | Two runs: 46,774 / 45,749 ms. `TRUNCATE` 26 / 19 ms; `stop_times` 33.4 / 32.9 s |
+| Load `stop_times` with PostgreSQL `COPY` (`CopyManager.copyIn`, CSV built with `CSVPrinter`), 10,000 rows per `COPY` | 2,901,867 | ~25–28 s | Two runs: 27,972 / 25,416 ms, including parsing. About 20% less time than `batchUpdate` (~33 s) |
+| Whole schedule with `COPY` for `stop_times` (everything else `batchUpdate`) | 3,856,963 | ~38–43 s | Two runs: 43,428 / 38,488 ms |
+| Load the first 100,000 `stop_times` rows with plain JPA `saveAll` (entity with an assigned composite ID, 1,000 per `saveAll`, `flush` + `clear` after each) | 100,000 | 130.5 s | ~1.31 ms/row. One run, inside the Spring app, rolled back afterwards. **Estimate for all 2,901,867 rows: ~3,790 s (~63 min)**, about 115× `batchUpdate` and 140× `COPY` |
+| Whole schedule again, with all tables already full, cleared with `DELETE`s | | ~249 s | One run: 248,657 ms. The timed inserts took about the same as before, so the extra ~200 s was spent **outside** them, most likely in the `DELETE`s that clear the old data (see below) |
 
 The second row is the real floor for any import: whatever the database step adds comes on top of about 2.2 s. Parsing every column roughly doubled the time compared with reading alone.
+
+Moving from one connection and commit per row to one transaction made row-by-row inserts about 16× faster. These runs can't tell whether the saving comes mostly from fewer connections or fewer commits (**to confirm**). Even at ~0.59 ms/row, `stop_times` would take roughly 28 minutes (an estimate, not measured), so the large tables need `batchUpdate` or `COPY`.
+
+Batching confirmed this on `shapes`: one row at a time at ~0.59 ms/row would take roughly 8.6 minutes (estimate), while `batchUpdate` took 14.4 s, and 9.4 s with `reWriteBatchedInserts=true`. That's about 35× and 55× less time per row. The per-row comparison is rough, because the row-by-row figure was measured on different tables. Each batch timing is a single run.
+
+**Clearing a full schedule with `DELETE` is slow; `TRUNCATE` fixes it (confirmed).** Measured with all tables full, each statement timed inside a transaction that was then rolled back:
+
+| Clearing method | Time |
+| --- | --- |
+| One `DELETE` per table, children first | **247.2 s** in total, of which `DELETE FROM stops` alone took **242.9 s**. Every other table took under 2 s (`stop_times` 1.4 s, `trips` 1.8 s, `shapes` 0.3 s) |
+| One `TRUNCATE` listing all ten schedule tables | **0.019 s** |
+
+This matches the explanation: deleting a stop makes PostgreSQL check that no `stop_times` row still points to it, and with no index on `stop_times.stop_id` each of the 5,842 checks reads the whole table, including the 2.9 million rows deleted earlier in the same transaction. `TRUNCATE` empties the tables at once with no row-by-row checks, and in PostgreSQL it can still be rolled back. Both experiments were rolled back and the data was still loaded afterwards.
+
+**`COPY` vs `batchUpdate` on `stop_times` (confirmed, two runs each):** `COPY` took ~25–28 s, `batchUpdate` ~33 s, so `COPY` saved about a fifth of the time. The gap is smaller than the shapes batching gain because both timings share the same fixed costs: reading and parsing the file (~2.2 s), and PostgreSQL checking two foreign keys (`trip_id`, `stop_id`) for every row, which `COPY` also does (likely the bigger share; to confirm). The `COPY` run's data was checked: trip `10000010`'s first and last rows match the `batchUpdate` run exactly, and no headsign was stored as an empty string (all blanks are `NULL`).
+
+**Plain JPA `saveAll` on `stop_times` (measured on a sample):** 100,000 rows took 130.5 s, about 1.31 ms per row, so the full table would take roughly an hour (estimate). That is about 115 times slower than `batchUpdate` and 140 times slower than `COPY`. Expected cause, **to confirm**: the entity's ID `(trip_id, stop_sequence)` is assigned by us, so Spring Data cannot tell a new row from an existing one and calls `merge`, which runs a `SELECT` for each row before its `INSERT`, and Hibernate does not batch inserts unless configured to. Hibernate's session statistics were switched on but did not appear in the log, so the statement count is still unconfirmed.
+
+**Confirmed:** the three stored points of `shp-11-54` read back exactly as in the file (`0.0`, `0.01`, `20.1` for `shape_dist_traveled`), and rows with an empty distance load successfully (passed as `null`, so stored as `NULL`).
 
 ## Open Decisions
 
@@ -311,9 +358,15 @@ These are **potential classifications**, not guarantees. A vehicle can disappear
 - [x] Confirm the station / platform hierarchy in `stops.txt` (`location_type`, `parent_station`).
 - [x] Record row count and quirks for `trips.txt`.
 - [x] Record patterns and quirks for `calendar.txt` and `calendar_dates.txt`.
-- [ ] Confirm which routes use the named (`TCFD`, `CFD`, `TRIL`) services.
+- [x] Confirm which routes use the named (`TCFD`, `CFD`, `TRIL`) services.
 - [x] Record row count, quirks and a parse-time baseline for `stop_times.txt`.
 - [x] Record row count, quirks and a parse-time baseline for `shapes.txt`.
+- [x] Load every table, including `stop_times`, into PostgreSQL and confirm counts and constraints.
+- [x] Time `stop_times` with PostgreSQL `COPY` (~25–28 s vs ~33 s for `batchUpdate`).
+- [x] Time `stop_times` with plain JPA `saveAll` (100,000-row sample: 130.5 s; full run estimated at ~63 min).
+- [ ] Confirm the JPA statement count (expected: a `SELECT` before every `INSERT`, no batching), then measure JPA with that fixed.
+- [x] Confirm why clearing a full schedule with `DELETE` takes ~200 s (`DELETE FROM stops`: 242.9 s; `TRUNCATE`: 0.019 s).
+- [x] Replace the `DELETE`s with `TRUNCATE` in the loader (full reload back to ~46 s).
 - [ ] Read the GTFS-Realtime reference and test the live feed once API access is available.
 
 ## Reference

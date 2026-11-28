@@ -1,20 +1,22 @@
 package com.hirokombe.ghostbus.gtfs;
 
 import com.hirokombe.ghostbus.gtfs.model.*;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
+import org.postgresql.PGConnection;
+import org.postgresql.copy.CopyManager;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.UncheckedIOException;
+import java.io.*;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class GtfsScheduleWriter {
 
@@ -68,6 +70,17 @@ public class GtfsScheduleWriter {
                 stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
+
+    private static final String COPY_STOP_TIMES = """
+        COPY stop_times (trip_id, stop_sequence, stop_id, arrival_time_seconds, departure_time_seconds,
+                stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
+        FROM STDIN WITH (FORMAT csv)
+        """;
+
+    private static final CSVFormat COPY_CSV = CSVFormat.DEFAULT.builder()
+            .setRecordSeparator("\n")
+            .setNullString("")
+            .get();
 
     private final JdbcTemplate jdbcTemplate;
 
@@ -215,6 +228,39 @@ public class GtfsScheduleWriter {
         jdbcTemplate.batchUpdate(INSERT_STOP_TIME, batch);
     }
 
+    public long copyStopTimes(List<GtfsStopTime> stopTimes) {
+        StringWriter csv = new StringWriter();
+        try (CSVPrinter printer = new CSVPrinter(csv, COPY_CSV)) {
+            for (GtfsStopTime stopTime : stopTimes) {
+                printer.printRecord(
+                        stopTime.tripId(),
+                        stopTime.stopSequence(),
+                        stopTime.stopId(),
+                        stopTime.arrivalTimeSeconds(),
+                        stopTime.departureTimeSeconds(),
+                        stopTime.stopHeadsign(),
+                        stopTime.pickupType(),
+                        stopTime.dropOffType(),
+                        stopTime.shapeDistTraveled(),
+                        stopTime.timepoint()
+                );
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+
+        // Send it with COPY on the transaction's own connection
+        Long copied = jdbcTemplate.execute((ConnectionCallback<Long>) connection -> {
+            CopyManager copyManager = connection.unwrap(PGConnection.class).getCopyAPI();
+            try {
+                return copyManager.copyIn(COPY_STOP_TIMES, new StringReader(csv.toString()));
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        });
+        return copied;
+    }
+
     public static void main(String[] args) {
         DriverManagerDataSource dataSource = new DriverManagerDataSource(
                 "jdbc:postgresql://localhost:15432/ghostbus?reWriteBatchedInserts=true",
@@ -311,25 +357,23 @@ public class GtfsScheduleWriter {
                     }
                     System.out.println("Trips: " + (System.nanoTime() - tripsStart) / 1_000_000 + " ms");
 
-                    // stop_times reference trips and stops, both loaded above
+                    // stop_times with COPY, 10,000 rows per COPY command
                     List<GtfsStopTime> stopTimeBatch = new ArrayList<>();
-                    AtomicInteger stopTimes = new AtomicInteger();
+                    AtomicLong stopTimes = new AtomicLong();
                     long stopTimesStart = System.nanoTime();
                     try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/stop_times.txt")) {
                         reader.read("stop_times.txt", in, row -> {
                             stopTimeBatch.add(GtfsStopTime.from(row));
-                            if (stopTimeBatch.size() == 1_000) {
-                                writer.insertStopTimes(stopTimeBatch);
-                                stopTimes.addAndGet(stopTimeBatch.size());
+                            if (stopTimeBatch.size() == 10_000) {
+                                stopTimes.addAndGet(writer.copyStopTimes(stopTimeBatch));
                                 stopTimeBatch.clear();
                             }
                         });
                     }
                     if (!stopTimeBatch.isEmpty()) {
-                        writer.insertStopTimes(stopTimeBatch);
-                        stopTimes.addAndGet(stopTimeBatch.size());
+                        stopTimes.addAndGet(writer.copyStopTimes(stopTimeBatch));
                     }
-                    System.out.println("Stop times (batchUpdate): sent " + stopTimes.get() + " in "
+                    System.out.println("Stop times (COPY): PostgreSQL loaded " + stopTimes.get() + " rows in "
                             + (System.nanoTime() - stopTimesStart) / 1_000_000 + " ms");
                 } catch (IOException e) {
                     throw new UncheckedIOException(e);
@@ -357,5 +401,14 @@ public class GtfsScheduleWriter {
                 + ", shape_definitions=" + shapeDefinitionCount + ", shapes=" + shapeCount + ", trips=" + tripCount
                 + ", stop_times=" + stopTimeCount
                 + " (expected 1, 178, 5,842, 22, 18, 52, 704, 874,720, 73,559, 2,901,867)");
+
+        // The CSV round trip must keep every value and every NULL
+        System.out.println("Trip 10000010, first and last stop:");
+        jdbcTemplate.queryForList(
+                        "SELECT * FROM stop_times WHERE trip_id = '10000010' AND stop_sequence IN (1, 55) ORDER BY stop_sequence")
+                .forEach(System.out::println);
+        Integer emptyHeadsigns = jdbcTemplate.queryForObject(
+                "SELECT count(*) FROM stop_times WHERE stop_headsign = ''", Integer.class);
+        System.out.println("Empty-string headsigns (should be 0, blanks must be NULL): " + emptyHeadsigns);
     }
 }

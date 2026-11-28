@@ -3,6 +3,9 @@ package com.hirokombe.ghostbus.gtfs.jpa;
 import com.hirokombe.ghostbus.gtfs.GtfsCsvReader;
 import com.hirokombe.ghostbus.gtfs.model.GtfsStopTime;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.EntityManagerFactory;
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -28,13 +31,17 @@ public class JpaStopTimesBenchmark implements CommandLineRunner {
 
     private final StopTimeRepository repository;
     private final EntityManager entityManager;
+    private final Statistics statistics;
     private final JdbcTemplate jdbcTemplate;
     private final TransactionTemplate transaction;
 
     public JpaStopTimesBenchmark(StopTimeRepository repository, EntityManager entityManager,
-                                 JdbcTemplate jdbcTemplate, PlatformTransactionManager transactionManager) {
+                                 EntityManagerFactory entityManagerFactory, JdbcTemplate jdbcTemplate,
+                                 PlatformTransactionManager transactionManager) {
         this.repository = repository;
         this.entityManager = entityManager;
+        // Hibernate's counters; they only count when hibernate.generate_statistics is true
+        this.statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
         this.jdbcTemplate = jdbcTemplate;
         this.transaction = new TransactionTemplate(transactionManager);
     }
@@ -47,6 +54,7 @@ public class JpaStopTimesBenchmark implements CommandLineRunner {
             // Nothing references stop_times, so it can be truncated on its own
             jdbcTemplate.execute("TRUNCATE stop_times");
 
+            statistics.clear(); // count only what the saveAll loop does
             List<StopTimeEntity> batch = new ArrayList<>();
             AtomicInteger saved = new AtomicInteger();
             long start = System.nanoTime();
@@ -74,6 +82,8 @@ public class JpaStopTimesBenchmark implements CommandLineRunner {
                     + inTable + " in the table)");
             System.out.println("Estimate for all " + FILE_ROWS + " rows: ~"
                     + millis * FILE_ROWS / saved.get() / 1000 + " s");
+            System.out.println("Hibernate statements sent: " + statistics.getPrepareStatementCount()
+                    + ", entity inserts: " + statistics.getEntityInsertCount());
 
             status.setRollbackOnly(); // undo the test, keep the real data
         });

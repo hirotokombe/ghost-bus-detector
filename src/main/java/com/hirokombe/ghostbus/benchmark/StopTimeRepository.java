@@ -1,4 +1,4 @@
-package com.hirokombe.ghostbus.gtfs.jpa;
+package com.hirokombe.ghostbus.benchmark;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 

@@ -65,12 +65,6 @@ public class GtfsScheduleWriter {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
 
-    private static final String INSERT_STOP_TIME = """
-            INSERT INTO stop_times (trip_id, stop_sequence, stop_id, arrival_time_seconds, departure_time_seconds,
-                stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """;
-
     private static final String COPY_STOP_TIMES = """
         COPY stop_times (trip_id, stop_sequence, stop_id, arrival_time_seconds, departure_time_seconds,
                 stop_headsign, pickup_type, drop_off_type, shape_dist_traveled, timepoint)
@@ -207,25 +201,6 @@ public class GtfsScheduleWriter {
             });
         }
         jdbcTemplate.batchUpdate(INSERT_TRIP, batch);
-    }
-
-    public void insertStopTimes(List<GtfsStopTime> stopTimes) {
-        List<Object[]> batch = new ArrayList<>();
-        for (GtfsStopTime stopTime : stopTimes) {
-            batch.add(new Object[] {
-                    stopTime.tripId(),
-                    stopTime.stopSequence(),
-                    stopTime.stopId(),
-                    stopTime.arrivalTimeSeconds(),
-                    stopTime.departureTimeSeconds(),
-                    stopTime.stopHeadsign(),
-                    stopTime.pickupType(),
-                    stopTime.dropOffType(),
-                    stopTime.shapeDistTraveled(),
-                    stopTime.timepoint()
-            });
-        }
-        jdbcTemplate.batchUpdate(INSERT_STOP_TIME, batch);
     }
 
     public long copyStopTimes(List<GtfsStopTime> stopTimes) {

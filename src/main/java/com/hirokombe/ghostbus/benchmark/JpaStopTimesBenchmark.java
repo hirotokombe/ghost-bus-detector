@@ -1,4 +1,4 @@
-package com.hirokombe.ghostbus.gtfs.jpa;
+package com.hirokombe.ghostbus.benchmark;
 
 import com.hirokombe.ghostbus.gtfs.GtfsCsvReader;
 import com.hirokombe.ghostbus.gtfs.model.GtfsStopTime;

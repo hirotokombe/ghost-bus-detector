@@ -21,13 +21,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-// Times JPA saveAll on a sample of stop_times, then rolls back. Runs only with the jpa-benchmark profile.
+// Times JPA saveAll on stop_times, then rolls back. Runs only with the jpa-benchmark profile.
 @Component
 @Profile("jpa-benchmark")
 public class JpaStopTimesBenchmark implements CommandLineRunner {
 
-    private static final int SAMPLE_SIZE = 100_000;
     private static final long FILE_ROWS = 2_901_867;
+    private static final int SAMPLE_SIZE = (int) FILE_ROWS; // the whole file
 
     private final StopTimeRepository repository;
     private final EntityManager entityManager;
@@ -60,7 +60,7 @@ public class JpaStopTimesBenchmark implements CommandLineRunner {
             long start = System.nanoTime();
             try (InputStream in = new FileInputStream("data/gtfs/GTFSExport/stop_times.txt")) {
                 reader.read("stop_times.txt", in, row -> {
-                    if (saved.get() >= SAMPLE_SIZE) {
+                    if (saved.get() + batch.size() >= SAMPLE_SIZE) {
                         return; // sample is full; skip the rest of the file
                     }
                     batch.add(StopTimeEntity.from(GtfsStopTime.from(row)));
@@ -75,13 +75,18 @@ public class JpaStopTimesBenchmark implements CommandLineRunner {
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+            if (!batch.isEmpty()) {
+                // The last batch is usually not full
+                repository.saveAll(batch);
+                entityManager.flush();
+                entityManager.clear();
+                saved.addAndGet(batch.size());
+            }
             long millis = (System.nanoTime() - start) / 1_000_000;
 
             Long inTable = jdbcTemplate.queryForObject("SELECT count(*) FROM stop_times", Long.class);
             System.out.println("JPA saveAll: " + saved.get() + " rows in " + millis + " ms ("
                     + inTable + " in the table)");
-            System.out.println("Estimate for all " + FILE_ROWS + " rows: ~"
-                    + millis * FILE_ROWS / saved.get() / 1000 + " s");
             System.out.println("Hibernate statements sent: " + statistics.getPrepareStatementCount()
                     + ", entity inserts: " + statistics.getEntityInsertCount());
 

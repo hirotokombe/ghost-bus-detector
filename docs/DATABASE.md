@@ -171,6 +171,15 @@ stateDiagram-v2
 - `zip_sha256` is a fingerprint of the downloaded zip. If it matches the active version's hash, the zip hasn't changed and the import can be skipped.
 - The `LOADING` row must be inserted **in its own transaction, before** the import transaction starts. If it were inside the import transaction, a failed import would roll it back too, and the failure would leave no record.
 
+### The import must be one transaction
+
+The schedule load (deleting the old rows and inserting the new ones) runs as **one transaction**. Two reasons, both confirmed while building the loader:
+
+- **No half-loaded schedule.** Without a transaction, each insert commits on its own. When the `stops` load failed partway, 2,028 of 5,842 stops were left in the table. Inside one transaction, a simulated failure after loading rolled back the deletes and all 6,021 inserts, and the previous schedule stayed in place.
+- **Deferred foreign keys need it.** `stops.parent_station` is checked at commit. With autocommit, every row is its own commit, so a platform listed before its station fails (see 4.3).
+
+It's also much faster: one connection and one commit instead of one per row (see the performance baseline in `NOTES.md`).
+
 ---
 
 ## 3. Tracking tables
@@ -311,7 +320,9 @@ The live feed can mention trips the loaded schedule doesn't know about: a schedu
 | IDs are `TEXT` | GTFS defines IDs as strings, even when they look like numbers. |
 | Real moments in time are `TIMESTAMPTZ` | Stores an exact instant and avoids time-zone bugs. Plain `TIMESTAMP` doesn't record which zone it's in. |
 | `status` is `TEXT` with a `CHECK`, not a Postgres `ENUM` | Adding a value later is a simple migration; changing an `ENUM` is more awkward. |
-| `stops.parent_station` is `DEFERRABLE INITIALLY DEFERRED` | It's checked at commit instead of row by row, so a stop listed before its parent station in `stops.txt` doesn't fail the import. |
+| Clear the schedule with one `TRUNCATE` of all ten schedule tables, not `DELETE` | Measured with all tables full: `DELETE`s took 247 s, almost all in `DELETE FROM stops` (242.9 s), because each deleted stop triggers a foreign-key check that scans `stop_times` (no index on `stop_id`). One `TRUNCATE` took 0.019 s. All referencing tables must be in the same `TRUNCATE` statement, and it can be rolled back with the rest of the import. Adding an index on `stop_times.stop_id` would also fix the `DELETE`, but would slow every import of 2.9 million rows. |
+| Load `stop_times` with PostgreSQL `COPY`; the other tables with `batchUpdate` or one row at a time | `stop_times` is 2.9 million rows, three quarters of the schedule. `COPY` took ~25–31 s against ~33–40 s for `batchUpdate` and 70.6 s for tuned JPA. It needs the PostgreSQL driver at compile time. The smaller tables load in a few seconds either way. Measurements in `NOTES.md`. |
+| `stops.parent_station` is `DEFERRABLE INITIALLY DEFERRED` | It's checked at commit instead of row by row, so a stop listed before its parent station in `stops.txt` doesn't fail the import. **This only works if the whole load is one transaction.** Confirmed: with autocommit, every row is its own commit, and the 2,029th stop (parent `3000_stn`, listed later) fails. |
 | No `DEFAULT` on route colours | A batch insert lists every column, so a default would never apply. The loader or the UI picks fallbacks. |
 | `trip_statuses` key is `(service_date, trip_id)`, date first | Almost every query asks for "trips on date X", and a composite key can be searched by its first column alone. |
 
@@ -372,6 +383,8 @@ Foreign keys mean parents must exist before children. Insert in this order, and 
 
 `agency` → `routes` → `stops` → `services` → `calendar`, `calendar_dates` → `shape_definitions` → `shapes` → `trips` → `stop_times`
 
+`TRUNCATE` on a parent table is refused while any other table has a foreign key pointing at it, even if that table is empty, unless the referencing tables are listed in the **same** `TRUNCATE` statement. The loader therefore truncates all ten schedule tables in one statement. `DELETE` checks row by row, which turned out to be very slow once `stop_times` is full (see 4.3).
+
 ---
 
 ## 7. Open questions
@@ -381,11 +394,11 @@ These are still unverified and may need new migrations later:
 - **Live `trip_id`s:** do they match `trips.txt` exactly? This is unconfirmed until we have API access.
 - **Cancellations:** what does a cancelled trip look like in OC Transpo's trip-updates feed?
 - **`start_date`:** does the feed always include it?
-- **`agency_id`:** if `agency.txt` leaves it empty, the loader must fill in the same value in `agency` and `routes`.
-- **`route_type`:** confirm every value in `routes.txt` is in the `CHECK` list.
 - **Retention:** how long to keep observation rows. Volume is roughly (vehicles in service × 2,880 polls per day) rows per day for each feed.
-- **Foreign-key cost on `stop_times`:** to be measured when the bulk loader is built.
-- **Import locking:** replacing the schedule inside one transaction may block readers until it commits. Check whether that matters in practice.
+- **Foreign-key cost on `stop_times`:** not measured yet. `COPY` still checks `trip_id` and `stop_id` for every row; how much of the ~25–31 s that takes is to confirm.
+- **Import locking:** replacing the schedule inside one transaction may block readers until it commits. `TRUNCATE` takes the strongest table lock, so readers of the schedule tables will wait for the whole import (~40–45 s today). Check whether that matters in practice.
+
+**Resolved:** `agency_id` (every route has `agency_id = 1`, so the loader needs no fill-in) and `route_type` (only `0` and `3`, both in the `CHECK` list). Both were confirmed when all 178 routes loaded under the V1 constraints; details are in `NOTES.md`.
 
 ---
 
@@ -399,5 +412,7 @@ These are still unverified and may need new migrations later:
 | **Primary key (PK)** | Column(s) that uniquely identify a row. Postgres indexes them automatically. |
 | **Foreign key (FK)** | A column that must match a row in another table. |
 | **Partial index** | An index that only covers rows matching a `WHERE` condition. |
+| **Transaction** | A group of changes that is saved all together (commit) or undone all together (rollback). |
+| **Autocommit** | Each statement is its own transaction and is saved the moment it runs. `JdbcTemplate`'s behaviour outside a transaction. |
 | **Stale feed** | The feed responds, but its contents stopped updating. |
 | **Retention** | How long old rows are kept before being deleted. |

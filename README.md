@@ -99,6 +99,17 @@ While the loader is being built, it's run from a temporary `main` method in `Gtf
 
 It reloads the tables built so far inside one transaction, then prints `Committed` (or `Rolled back: ...`), the time taken and the row counts.
 
+### Optional: rerun the JPA benchmark
+
+The JPA comparison for `stop_times` runs only with the `jpa-benchmark` profile. It loads all of `stop_times.txt` with JPA inside a transaction, prints the time and Hibernate's statement count, then rolls back, so the loaded schedule is unchanged.
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=jpa-benchmark          # macOS / Linux
+.\mvnw.cmd spring-boot:run "-Dspring-boot.run.profiles=jpa-benchmark"    # Windows
+```
+
+In IntelliJ, set **Active profiles** to `jpa-benchmark` in the run configuration, and clear it afterwards. The profile turns off the web server and Docker Compose support, so start the database first (step 1).
+
 ### 4. Run the tests
 
 ```bash
@@ -141,8 +152,9 @@ src/main/java/com/hirokombe/ghostbus/
     GtfsCsvReader.java        Streams a GTFS CSV file row by row (handles a UTF-8 BOM)
     GtfsRow.java              Typed, validated access to one CSV row
     GtfsTime.java             "25:30:00" -> 91800 seconds (times past midnight)
-    GtfsScheduleWriter.java   Inserts parsed rows into PostgreSQL
+    GtfsScheduleWriter.java   Writes parsed rows to PostgreSQL (batch inserts; COPY for stop_times)
     model/                    One Java record per GTFS file
+  benchmark/                JPA loading benchmark, runs only with the jpa-benchmark profile
 src/main/resources/
   db/migration/             Flyway migrations (V1 schedule, V2 tracking, V3 indexes)
   application.yaml
@@ -160,6 +172,7 @@ Details and trade-offs are in [`docs/DATABASE.md`](docs/DATABASE.md).
 - **One schedule at a time, replaced in a single transaction.** A failed import rolls back completely, so the previous schedule stays in place instead of leaving a half-loaded one. This was tested by forcing a failure after loading: the deletes and all inserts were undone.
 - **Times past midnight stored as seconds.** GTFS times like `25:30:00` (1:30 a.m., but part of the previous day's service) don't fit PostgreSQL's `TIME` type, so they're stored as seconds from the start of the service day.
 - **Strict constraints on the schedule, permissive on the live feed.** Bad schedule data fails the import loudly; unexpected live-feed data is stored as-is so no poll is lost.
+- **Bulk-load method chosen by measurement.** `stop_times` (2.9 million rows) was loaded three ways: PostgreSQL `COPY` (~25–31 s), JDBC `batchUpdate` (~33–40 s) and tuned JPA (70.6 s). The loader uses `COPY`; the JPA benchmark is kept in its own package behind a Spring profile so the comparison can be rerun.
 - **No foreign keys from tracking history into the schedule.** Trip IDs can change with each weekly schedule, so trip statuses copy the few schedule facts they need instead of pointing at rows that will be replaced.
 
 ## Measured so far
@@ -174,21 +187,22 @@ From [`docs/NOTES.md`](docs/NOTES.md). Local development machine; only numbers a
 | Insert shape points with `batchUpdate` (1,000 rows per batch) | 874,720 | ~14.4 s (~0.016 ms/row) |
 | Same, with the PostgreSQL driver's `reWriteBatchedInserts=true` | 874,720 | ~9.4 s (~0.011 ms/row) |
 | Insert trips the same way | 73,559 | ~1 s |
-| Insert stop times the same way | 2,901,867 | ~33 s |
-| Load stop times with PostgreSQL `COPY` instead | 2,901,867 | **~25–28 s** |
-| Load stop times with plain JPA `saveAll` (measured on 100,000 rows, then estimated) | 2,901,867 | ~63 min (estimate) |
-| **Load the whole schedule** (clear with `TRUNCATE`, then every table, one transaction; `COPY` for stop times) | 3,856,963 | **~38–43 s** |
+| Insert stop times the same way | 2,901,867 | ~33–40 s |
+| Load stop times with PostgreSQL `COPY` instead | 2,901,867 | **~25–31 s** |
+| Load stop times with plain JPA `saveAll` (measured on 100,000 rows, then estimated) | 2,901,867 | ~1 hour (estimate, likely high) |
+| Same, with JPA tuned (no `SELECT` before each `INSERT`, Hibernate batching on) | 2,901,867 | **70.6 s** |
+| **Load the whole schedule** (clear with `TRUNCATE`, then every table, one transaction; `COPY` for stop times) | 3,856,963 | **~38–45 s** |
 | Clear the old schedule first with `DELETE` (all tables full) | 3,856,963 | 247 s (243 s of it in one table) |
 | Clear it with one `TRUNCATE` instead | 3,856,963 | 0.02 s |
 
-Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. Batching went much further: at the row-by-row rate, the 874,720 shape points would take roughly 8.6 minutes (an estimate), but `batchUpdate` loaded them in 14.4 s, and in 9.4 s once the driver rewrote each batch into multi-row `INSERT`s. The whole schedule (3.86 million rows) now loads in about 50 seconds. Clearing the old schedule turned out to matter as much as loading the new one: `DELETE FROM stops` took 243 s, because each deleted stop made PostgreSQL scan the 2.9 million `stop_times` rows for references. One `TRUNCATE` of all schedule tables takes 0.02 s, which brought a full reload from 249 s back to about 46 s. On the 2.9 million `stop_times` rows, PostgreSQL `COPY` took ~25–28 s against ~33 s for `batchUpdate`, about a fifth less; both still pay for parsing and for two foreign-key checks per row. Plain JPA `saveAll`, the default in most Spring apps, took 130.5 s for just 100,000 of those rows, putting a full load at roughly an hour: about 115 times slower than `batchUpdate`. Next: confirm why (most likely a `SELECT` before every `INSERT`, because the IDs are assigned by the feed) and measure JPA again with that fixed.
+Wrapping the load in one transaction made row-by-row inserts about 16 times faster per row. Batching went much further: at the row-by-row rate, the 874,720 shape points would take roughly 8.6 minutes (an estimate), but `batchUpdate` loaded them in 14.4 s, and in 9.4 s once the driver rewrote each batch into multi-row `INSERT`s. With batching, the whole schedule (3.86 million rows) loaded in about 50 seconds. Clearing the old schedule turned out to matter as much as loading the new one: `DELETE FROM stops` took 243 s, because each deleted stop made PostgreSQL scan the 2.9 million `stop_times` rows for references. One `TRUNCATE` of all schedule tables takes 0.02 s, which brought a full reload from 249 s back to about 46 s. On the 2.9 million `stop_times` rows, PostgreSQL `COPY` took ~25–31 s against ~33–40 s for `batchUpdate`, usually about a fifth less; both still pay for parsing and for two foreign-key checks per row. Plain JPA `saveAll`, the default in most Spring apps, took about two minutes for just 100,000 of those rows, putting a full load at roughly an hour: about 100 times slower than `batchUpdate`. Hibernate's own statistics showed why: **200,000 SQL statements for 100,000 rows**. Because the IDs come from the feed, Spring Data can't tell new rows from existing ones, so it runs a `SELECT` before every `INSERT`, and each `INSERT` is sent on its own. Fixing both (telling Spring Data each row is new, and turning on Hibernate's batching) cut the statements from 200,000 to 100 and the sample from about two minutes to 5 s. Measured on the full table, tuned JPA took 70.6 s: about twice `batchUpdate` and 2.5 times `COPY`. For a bulk load like this, plain JDBC wins, and `COPY` is the fastest, so the loader uses `COPY` for `stop_times` and the whole schedule reloads in about 40–45 s. (The JPA runs were started with a JVM flag IntelliJ adds for faster startup, so they may be slightly pessimistic; to confirm.)
 
 ## Roadmap
 
 - [x] Setup: Spring Boot, PostgreSQL + PostGIS in Docker, Flyway
 - [x] Study the OC Transpo GTFS static data ([`docs/NOTES.md`](docs/NOTES.md))
 - [x] Database schema and indexes ([`docs/DATABASE.md`](docs/DATABASE.md))
-- [ ] **Static schedule loader** (in progress: parsing done; the whole schedule reloads in one transaction in about 40 s; next: COPY vs JPA comparison and the real import flow)
+- [ ] **Static schedule loader** (in progress: parsing done; the whole schedule reloads in one transaction in about 40–45 s, with `COPY` for stop times; next: the real import flow: download, feed versions, weekly runs)
 - [ ] Today's planned service (calendar rules, overnight trips, daylight-saving days)
 - [ ] Realtime poller (waiting on OC Transpo API access)
 - [ ] Trip state engine
